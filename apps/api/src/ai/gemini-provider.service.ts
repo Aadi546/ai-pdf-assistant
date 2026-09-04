@@ -3,7 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 import { Embedder } from "../embeddings/embedder.interface";
 import { AIProvider, GenerateParams } from "./ai-provider.interface";
 
-const GENERATION_MODEL = "gemini-2.5-flash";
+const GENERATION_MODEL = "gemini-3.6-flash";
 const EMBEDDING_MODEL = "gemini-embedding-2";
 const EMBEDDING_DIMENSIONS = 768; // must match the pgvector column — see Phase 7 migration
 

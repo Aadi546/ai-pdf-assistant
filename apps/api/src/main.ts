@@ -10,6 +10,10 @@ import { LoggingInterceptor } from "./common/interceptors/logging.interceptor";
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Render terminates TLS in front of the API — without this, Express sees
+  // every request as plain HTTP and refuses to set secure: true cookies.
+  app.set("trust proxy", 1);
+
   app.enableCors({
     origin: process.env.WEB_ORIGIN ?? "http://localhost:3000",
     credentials: true, // required so the browser sends/receives the refresh-token cookie
