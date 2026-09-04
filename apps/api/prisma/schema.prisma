@@ -1,0 +1,148 @@
+// Prisma schema for the AI PDF Study Companion.
+// Models are added incrementally per implementation phase (see
+// docs/architecture.md and the approved plan) — Phase 2 adds User/Auth,
+// Phase 3 adds Document, etc.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String
+  name          String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  documents        Document[]
+  conversations    Conversation[]
+  readingProgress  ReadingProgress[]
+}
+
+enum DocumentStatus {
+  UPLOADING
+  PROCESSING
+  EMBEDDING
+  READY
+  FAILED
+}
+
+model Document {
+  id               String          @id @default(uuid())
+  userId           String
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title            String
+  originalFilename String
+  storageKey       String
+  mimeType         String
+  sizeBytes        Int
+  pageCount        Int?
+  status           DocumentStatus  @default(UPLOADING)
+  failureReason    String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  chunks           DocumentChunk[]
+  conversations    Conversation[]
+  readingProgress  ReadingProgress[]
+
+  @@index([userId, createdAt])
+}
+
+model DocumentChunk {
+  id         String   @id @default(uuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  pageNumber Int
+  // Heuristic (largest-font-on-page) heading guess, not a guaranteed true
+  // section/chapter — see docs/decisions/ (chapter/section detection ADR).
+  // No separate "chapter" field: at this detection quality a chapter vs.
+  // section distinction isn't reliably inferrable, so one heuristic field
+  // covers it rather than adding a second field neither phase can populate
+  // with confidence.
+  section    String?
+  chunkIndex Int
+  text       String
+  createdAt  DateTime @default(now())
+  // Prisma has no native pgvector type — `Unsupported` opts this column out
+  // of the generated client entirely (no typed field, excluded from
+  // findMany/select). All reads/writes of it go through raw SQL in
+  // PgVectorStore. Null until Phase 8's embedder actually populates it —
+  // same "column exists before anything fills it" pattern as pageCount
+  // between Phase 3 and Phase 6. 768 dims matches Gemini's text-embedding
+  // model (Phase 8); changing embedding models later means a migration.
+  embedding  Unsupported("vector(768)")?
+
+  @@index([documentId, pageNumber])
+}
+
+// V1 keeps one conversation per (user, document) — matches the product's
+// "chat about this document" mental model in the reader sidebar. Multiple
+// named/parallel conversation threads per document is a real feature but
+// not one this phase's UI has any use for yet; the unique constraint below
+// is what makes "find or create" at chat time race-safe without extra
+// locking, and is cheap to relax later (drop the constraint, let the API
+// accept a conversationId) if that changes.
+model Conversation {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  // Rolling summary for chat-memory compaction — not populated in V1 (see
+  // ChatService); the column exists so adding real summarization later is
+  // additive, not a migration.
+  summary    String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  messages   Message[]
+
+  @@unique([userId, documentId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+  // Pages the assistant cited in this message (parsed from "[Page N]"
+  // markers in its own output) — lets the frontend render them as jump
+  // links without re-parsing the message text client-side.
+  citedPages     Int[]        @default([])
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Durable "where did I leave off" — distinct from the ephemeral, Redis-only
+// reading context from Phase 5 (docs/architecture.md §6 vs §39): this
+// persists across devices/sessions and only ever changes on a meaningful
+// page change, not on every scroll tick. Written by ReadingContextService
+// alongside its Redis update (same trigger, no extra request from the
+// frontend) — this module only owns the read side and the upsert logic.
+model ReadingProgress {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId      String
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  currentPage     Int
+  // Null when the document's pageCount isn't known yet (extraction hasn't
+  // finished) — better than a misleading 0% or 100%.
+  progressPercent Int?
+  lastReadAt      DateTime @default(now()) @updatedAt
+
+  @@unique([userId, documentId])
+}

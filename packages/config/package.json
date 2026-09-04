@@ -1,0 +1,10 @@
+{
+  "name": "@ai-pdf/config",
+  "private": true,
+  "version": "0.1.0",
+  "files": [
+    "tsconfig.base.json",
+    "tsconfig.nestjs.json",
+    "tsconfig.nextjs.json"
+  ]
+}

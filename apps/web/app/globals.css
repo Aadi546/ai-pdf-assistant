@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(212 212 212) transparent;
+  }
+  .dark * {
+    scrollbar-color: rgb(64 64 64) transparent;
+  }
+}
+
+@layer components {
+  /* Card surface: soft glass look — subtle, not loud. */
+  .card {
+    @apply rounded-2xl border border-neutral-200/70 bg-white/80 shadow-sm backdrop-blur-sm dark:border-neutral-800/70 dark:bg-neutral-900/60;
+  }
+
+  .input-field {
+    @apply w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none transition-colors placeholder:text-neutral-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-indigo-500 dark:focus:ring-indigo-500/20;
+  }
+
+  .btn-primary {
+    @apply rounded-full bg-gradient-to-r from-indigo-500 to-cyan-500 px-4 py-2 text-sm font-medium text-white shadow-sm shadow-indigo-500/20 transition-opacity hover:opacity-90 disabled:opacity-50 disabled:hover:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply rounded-full border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:border-neutral-300 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-800 dark:text-neutral-200 dark:hover:border-neutral-700 dark:hover:bg-neutral-900;
+  }
+
+  .brand-mark {
+    @apply bg-gradient-to-r from-indigo-500 to-cyan-500 bg-clip-text text-transparent;
+  }
+}
