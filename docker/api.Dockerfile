@@ -32,4 +32,7 @@ COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/apps/api/prisma ./apps/api/prisma
 COPY --from=build /repo/packages ./packages
 EXPOSE 4000
-CMD ["node", "apps/api/dist/main.js"]
+# migrate deploy first — a fresh managed Postgres (Render/Supabase/etc.) has
+# no schema until this runs; safe to run on every boot since it's a no-op
+# once migrations are already applied.
+CMD ["sh", "-c", "cd apps/api && npx prisma migrate deploy && cd /repo && node apps/api/dist/main.js"]
