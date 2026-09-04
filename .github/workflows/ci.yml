@@ -29,21 +29,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports: ["9000:9000"]
-        options: >-
-          --health-cmd "mc ready local"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-        # minio's default entrypoint needs a command; GH Actions services
-        # can't override CMD, so this only works if the image's default
-        # entrypoint accepts no args as "serve /data" — if this job fails
-        # on the minio health check, switch it to a docker run step instead.
 
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_pdf_assistant
@@ -58,6 +43,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # GH Actions' `services:` block can't override a container's command,
+      # and minio's image needs `server /data` to actually start (its bare
+      # entrypoint doesn't serve anything, so the services-block version
+      # never passes its healthcheck) — run it by hand instead.
+      - name: Start minio
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 1
+          done
 
       - uses: pnpm/action-setup@v4
         with:
