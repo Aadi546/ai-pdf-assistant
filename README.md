@@ -91,3 +91,19 @@ the single source of truth, Redis for cache/queue/session, and object
 storage for files — see [docs/architecture.md](docs/architecture.md) §8 for
 the stage-by-stage plan for when to split out workers, scale the API
 horizontally, or swap the vector store.
+
+## Known limitations
+
+Deliberately out of scope for a portfolio-scale deployment — real gaps, not
+oversights, and each has an obvious next step if this ever needed to handle
+outside traffic:
+
+- **No API rate limiting** — `/auth/login`, `/auth/register`, and the upload
+  endpoint are all unthrottled. Add `@nestjs/throttler` if this is ever
+  exposed to untrusted traffic.
+- **No error tracking or metrics** — logging is structured JSON to stdout
+  only (see Observability above); nothing ships to Sentry, Datadog, or
+  similar. Fine at one operator's scale, not at a team's.
+- **Worker and API share one process/container** — see
+  [docs/architecture.md](docs/architecture.md) §8 stage 2 for the (already-
+  designed, not-yet-needed) split.

@@ -113,6 +113,17 @@ describe("Ingestion pipeline (e2e)", () => {
     expect(chunks.body).toHaveLength(3);
     expect(chunks.body.map((c: { pageNumber: number }) => c.pageNumber)).toEqual([1, 2, 3]);
     expect(chunks.body[1].text).toContain("sharding");
+
+    // This test's user never entered a Gemini key — the embedding job
+    // (enqueued automatically once extraction finishes) should have found
+    // no key and parked here rather than failing or hanging at PROCESSING.
+    // See EmbeddingProcessor: a missing key is a park, not an error.
+    const status = await request(app.getHttpServer())
+      .get(`/documents/${documentId}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect(200);
+    expect(status.body).toMatchObject({ status: "EMBEDDING", needsApiKey: true });
+    expect(status.body.progress.embedded).toBe(0);
   });
 
   it("marks a corrupt PDF as FAILED with a reason instead of hanging at PROCESSING", async () => {

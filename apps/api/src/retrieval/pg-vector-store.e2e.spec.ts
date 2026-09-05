@@ -129,4 +129,63 @@ describe("PgVectorStoreService (e2e)", () => {
     const [top] = await store.search(documentId, basisVector(0), 1);
     expect(top).toMatchObject({ pageNumber: 1, text: "Chunk A: consistent hashing basics" });
   });
+
+  describe("listUnembeddedChunks / countEmbedded", () => {
+    it("only lists chunks with a null embedding, and reflects them in the count", async () => {
+      const doc = await prisma.document.create({
+        data: {
+          id: randomUUID(),
+          userId,
+          title: "unembedded test doc",
+          originalFilename: "test.pdf",
+          storageKey: "unused",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          status: "EMBEDDING",
+        },
+      });
+      const [embedded, unembedded1, unembedded2] = await prisma.$transaction([
+        prisma.documentChunk.create({ data: { documentId: doc.id, pageNumber: 1, chunkIndex: 0, text: "already embedded" } }),
+        prisma.documentChunk.create({ data: { documentId: doc.id, pageNumber: 2, chunkIndex: 0, text: "not yet embedded 1" } }),
+        prisma.documentChunk.create({ data: { documentId: doc.id, pageNumber: 3, chunkIndex: 0, text: "not yet embedded 2" } }),
+      ]);
+      await store.upsert([{ chunkId: embedded.id, embedding: basisVector(0) }]);
+
+      const before = await store.countEmbedded(doc.id);
+      expect(before).toEqual({ embedded: 1, total: 3 });
+
+      const remaining = await store.listUnembeddedChunks(doc.id, 10);
+      expect(remaining.map((c) => c.chunkId).sort()).toEqual([unembedded1.id, unembedded2.id].sort());
+
+      await store.upsert(remaining.map((c) => ({ chunkId: c.chunkId, embedding: basisVector(1) })));
+      const after = await store.countEmbedded(doc.id);
+      expect(after).toEqual({ embedded: 3, total: 3 });
+      expect(await store.listUnembeddedChunks(doc.id, 10)).toEqual([]);
+
+      await prisma.document.delete({ where: { id: doc.id } });
+    });
+
+    it("respects the limit, for resumption in bounded batches", async () => {
+      const doc = await prisma.document.create({
+        data: {
+          id: randomUUID(),
+          userId,
+          title: "limit test doc",
+          originalFilename: "test.pdf",
+          storageKey: "unused",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          status: "EMBEDDING",
+        },
+      });
+      await prisma.documentChunk.createMany({
+        data: Array.from({ length: 5 }, (_, i) => ({ documentId: doc.id, pageNumber: i + 1, chunkIndex: 0, text: `chunk ${i}` })),
+      });
+
+      const page = await store.listUnembeddedChunks(doc.id, 2);
+      expect(page).toHaveLength(2);
+
+      await prisma.document.delete({ where: { id: doc.id } });
+    });
+  });
 });

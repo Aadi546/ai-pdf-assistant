@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { Injectable } from "@nestjs/common";
-import { GoogleGenAI } from "@google/genai";
+import { ConfigService } from "@nestjs/config";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import { Embedder } from "../embeddings/embedder.interface";
 import { AIProvider, GenerateParams } from "./ai-provider.interface";
 
@@ -17,6 +19,20 @@ const EMBEDDING_DIMENSIONS = 768; // must match the pgvector column — see Phas
 @Injectable()
 export class GeminiProvider implements AIProvider, Embedder {
   readonly dimensions = EMBEDDING_DIMENSIONS;
+
+  // Tunable without a redeploy — Gemini's free-tier limits change, and this
+  // is the one place they matter. Only embedBatch (the bulk ingestion path)
+  // is paced/retried this hard; embed()'s single interactive call and
+  // generate()/stream() keep the lower interactive defaults below, since a
+  // chat request waiting behind ingestion-grade backoff would be a
+  // regression, not a fix.
+  private readonly embedMinIntervalMs: number;
+  private readonly embedMaxRetries: number;
+
+  constructor(config: ConfigService) {
+    this.embedMinIntervalMs = Number(config.get<string>("EMBED_MIN_INTERVAL_MS") ?? 700);
+    this.embedMaxRetries = Number(config.get<string>("EMBED_MAX_RETRIES") ?? 5);
+  }
 
   async generate(apiKey: string, params: GenerateParams): Promise<string> {
     const ai = new GoogleGenAI({ apiKey });
@@ -50,8 +66,12 @@ export class GeminiProvider implements AIProvider, Embedder {
   }
 
   async embed(apiKey: string, text: string): Promise<number[]> {
-    const [vector] = await this.embedBatch(apiKey, [text]);
-    return vector ?? [];
+    // Interactive path (chat embeds the user's question on every message,
+    // and ai-config validates a new key with this too) — no pacing, the
+    // default interactive retry budget only.
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await withRateLimitRetry(() => embedOne(ai, text, this.dimensions));
+    return response;
   }
 
   async embedBatch(apiKey: string, texts: string[]): Promise<number[][]> {
@@ -59,6 +79,7 @@ export class GeminiProvider implements AIProvider, Embedder {
 
     const ai = new GoogleGenAI({ apiKey });
     const vectors: number[][] = [];
+    const keyId = hashKey(apiKey);
 
     // Two things being worked around here, both verified against Google's
     // current docs rather than assumed:
@@ -71,18 +92,25 @@ export class GeminiProvider implements AIProvider, Embedder {
     //    that even accounting for the word/token estimate being approximate.
     for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
       const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
+
       // Real-world hazard, not hypothetical: Gemini's free tier caps
       // embed_content at a low request count (observed: 100/window) — a
-      // several-hundred-page document's first-chat embedding pass can burn
-      // through that in one go. Google's own 429 response includes exactly
-      // how long to wait, so honoring it turns "large document fails
-      // outright" into "large document takes a bit longer."
-      const response = await withRateLimitRetry(() =>
-        ai.models.embedContent({
-          model: EMBEDDING_MODEL,
-          contents: batch.map((text) => ({ parts: [{ text }] })),
-          config: { outputDimensionality: this.dimensions },
-        }),
+      // several-hundred-chunk document can burn through that fast if fired
+      // as quickly as possible. Pacing keeps this batch under the limit
+      // instead of hitting it and paying the (much larger) backoff below.
+      // Keyed per API key, never globally — quota is per key, and this is
+      // BYOK, so one user indexing a large document must not throttle
+      // another user's request.
+      await waitForPacingSlot(keyId, this.embedMinIntervalMs);
+
+      const response = await withRateLimitRetry(
+        () =>
+          ai.models.embedContent({
+            model: EMBEDDING_MODEL,
+            contents: batch.map((text) => ({ parts: [{ text }] })),
+            config: { outputDimensionality: this.dimensions },
+          }),
+        { maxRetries: this.embedMaxRetries },
       );
       for (const embedding of response.embeddings ?? []) {
         vectors.push(normalizeL2(embedding.values ?? []));
@@ -93,8 +121,18 @@ export class GeminiProvider implements AIProvider, Embedder {
   }
 }
 
+async function embedOne(ai: GoogleGenAI, text: string, dimensions: number): Promise<number[]> {
+  const response = await ai.models.embedContent({
+    model: EMBEDDING_MODEL,
+    contents: [{ parts: [{ text }] }],
+    config: { outputDimensionality: dimensions },
+  });
+  const [embedding] = response.embeddings ?? [];
+  return normalizeL2(embedding?.values ?? []);
+}
+
 const EMBED_BATCH_SIZE = 10;
-const MAX_RATE_LIMIT_RETRIES = 3;
+const DEFAULT_MAX_RATE_LIMIT_RETRIES = 3;
 const DEFAULT_BACKOFF_MS = 3000;
 const MAX_BACKOFF_MS = 65_000; // Gemini's own retryDelay hints have run up to ~60s in practice
 
@@ -108,6 +146,31 @@ function normalizeL2(vector: number[]): number[] {
   return vector.map((v) => v / magnitude);
 }
 
+// Never key the pacer on the raw API key — only a hash ever touches this
+// map, matching the "never log the key" discipline elsewhere in the AI
+// module. Stale entries are pruned lazily so a long-running process doesn't
+// accumulate one entry per BYOK key ever seen.
+const PACING_STALE_AFTER_MS = 10 * 60 * 1000;
+const lastRequestAtByKey = new Map<string, number>();
+
+function hashKey(apiKey: string): string {
+  return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
+}
+
+async function waitForPacingSlot(keyId: string, minIntervalMs: number): Promise<void> {
+  const now = Date.now();
+  for (const [id, at] of lastRequestAtByKey) {
+    if (now - at > PACING_STALE_AFTER_MS) lastRequestAtByKey.delete(id);
+  }
+
+  const last = lastRequestAtByKey.get(keyId);
+  if (last !== undefined) {
+    const wait = minIntervalMs - (now - last);
+    if (wait > 0) await sleep(wait);
+  }
+  lastRequestAtByKey.set(keyId, Date.now());
+}
+
 /**
  * The SDK doesn't retry rate limits itself, and its error surfaces the raw
  * API error body as the message — great for logs, unreadable for a user
@@ -116,15 +179,16 @@ function normalizeL2(vector: number[]): number[] {
  * guess, and on final failure throws a short, human message instead of
  * whatever the SDK produced.
  */
-async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+async function withRateLimitRetry<T>(fn: () => Promise<T>, options?: { maxRetries?: number }): Promise<T> {
+  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RATE_LIMIT_RETRIES;
   let lastError: unknown;
-  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
       if (!isRateLimitError(err)) throw err;
-      if (attempt === MAX_RATE_LIMIT_RETRIES) {
+      if (attempt === maxRetries) {
         throw new Error(
           "Gemini's rate limit is still being hit after retrying — wait a minute and try again, or check your plan's quota at https://ai.google.dev/gemini-api/docs/rate-limits.",
         );
@@ -136,9 +200,18 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastError;
 }
 
+// Checks the SDK's structured status first — @google/genai throws an
+// ApiError carrying a numeric `status` — and only falls back to string
+// matching on the message for anything that isn't one (a plain network
+// error, say). The old version matched on the raw message alone, which is
+// how an unrelated 404 (deprecated model name) or a false-positive string
+// match could be misclassified; a structured check doesn't have that problem.
 function isRateLimitError(err: unknown): boolean {
+  if (err instanceof ApiError && typeof err.status === "number") {
+    return err.status === 429;
+  }
   const text = err instanceof Error ? err.message : String(err);
-  return text.includes("RESOURCE_EXHAUSTED") || text.includes('"code":429') || text.includes("429 ");
+  return text.includes("RESOURCE_EXHAUSTED") || text.includes('"code":429');
 }
 
 function extractRetryDelayMs(err: unknown): number | null {

@@ -58,7 +58,14 @@ export class DocumentsController {
   @Get(":id/status")
   @UseGuards(DocumentOwnerGuard)
   status(@CurrentDocument() document: Document) {
-    return { status: document.status, failureReason: document.failureReason };
+    return this.documentsService.getStatus(document);
+  }
+
+  @Post(":id/retry")
+  @UseGuards(DocumentOwnerGuard)
+  async retry(@CurrentDocument() document: Document) {
+    await this.documentsService.retry(document);
+    return { status: "retrying" };
   }
 
   @Get(":id/chunks")

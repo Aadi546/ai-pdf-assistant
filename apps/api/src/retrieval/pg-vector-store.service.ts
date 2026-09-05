@@ -1,6 +1,12 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { ChunkEmbedding, SemanticSearchResult, VectorStore } from "./vector-store.interface";
+import {
+  ChunkEmbedding,
+  EmbeddingProgress,
+  SemanticSearchResult,
+  UnembeddedChunk,
+  VectorStore,
+} from "./vector-store.interface";
 
 interface RawSearchRow {
   id: string;
@@ -8,6 +14,16 @@ interface RawSearchRow {
   section: string | null;
   text: string;
   score: number;
+}
+
+interface RawUnembeddedRow {
+  id: string;
+  text: string;
+}
+
+interface RawCountRow {
+  embedded: bigint;
+  total: bigint;
 }
 
 /**
@@ -24,16 +40,18 @@ export class PgVectorStoreService implements VectorStore {
   async upsert(entries: ChunkEmbedding[]): Promise<void> {
     if (entries.length === 0) return;
 
-    await this.prisma.$transaction(
-      entries.map(
-        (entry) =>
-          this.prisma.$executeRaw`
-            UPDATE "DocumentChunk"
-            SET embedding = ${toVectorLiteral(entry.embedding)}::vector
-            WHERE id = ${entry.chunkId}
-          `,
-      ),
-    );
+    // Deliberately NOT one $transaction wrapping every entry: this is the
+    // embedding worker's resumption point (see EmbeddingProcessor) — each
+    // row's UPDATE is already atomic on its own, and committing them
+    // independently means a crash mid-batch keeps whatever finished instead
+    // of losing the whole batch to an all-or-nothing rollback.
+    for (const entry of entries) {
+      await this.prisma.$executeRaw`
+        UPDATE "DocumentChunk"
+        SET embedding = ${toVectorLiteral(entry.embedding)}::vector
+        WHERE id = ${entry.chunkId}
+      `;
+    }
   }
 
   async search(documentId: string, queryEmbedding: number[], topK: number): Promise<SemanticSearchResult[]> {
@@ -53,6 +71,28 @@ export class PgVectorStoreService implements VectorStore {
       text: row.text,
       score: row.score,
     }));
+  }
+
+  async listUnembeddedChunks(documentId: string, limit: number): Promise<UnembeddedChunk[]> {
+    const rows = await this.prisma.$queryRaw<RawUnembeddedRow[]>`
+      SELECT id, text
+      FROM "DocumentChunk"
+      WHERE "documentId" = ${documentId} AND embedding IS NULL
+      ORDER BY "pageNumber" ASC, "chunkIndex" ASC
+      LIMIT ${limit}
+    `;
+    return rows.map((row) => ({ chunkId: row.id, text: row.text }));
+  }
+
+  async countEmbedded(documentId: string): Promise<EmbeddingProgress> {
+    const [row] = await this.prisma.$queryRaw<RawCountRow[]>`
+      SELECT
+        COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded,
+        COUNT(*) AS total
+      FROM "DocumentChunk"
+      WHERE "documentId" = ${documentId}
+    `;
+    return { embedded: Number(row?.embedded ?? 0n), total: Number(row?.total ?? 0n) };
   }
 }
 

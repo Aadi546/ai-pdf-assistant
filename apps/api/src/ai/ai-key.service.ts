@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { RedisService } from "../redis/redis.service";
 
-const KEY_TTL_SECONDS = 24 * 60 * 60; // 24h — "session-scoped" per docs/architecture.md, refreshed on every use
+const KEY_TTL_SECONDS = 24 * 60 * 60; // 24h — "session-scoped" per docs/architecture.md, refreshed on every use (getKey uses GETEX)
 
 function redisKey(userId: string): string {
   return `ai_key:${userId}`;
@@ -28,7 +28,7 @@ export class AiKeyService {
   }
 
   getKey(userId: string): Promise<string | null> {
-    return this.redis.get(redisKey(userId));
+    return this.redis.getAndRefresh(redisKey(userId), KEY_TTL_SECONDS);
   }
 
   async hasKey(userId: string): Promise<boolean> {

@@ -358,7 +358,7 @@ interface so pgvector → Qdrant/Pinecone is a swap, not a rewrite):
 | Stage | Trigger | Change |
 |---|---|---|
 | 1 | V1 launch | Single NestJS instance + 1 worker process, modular monolith |
-| 2 | Ingestion backs up API latency | Run worker as its own deployed process (already separate BullMQ consumer — just point it at its own dyno/container) |
+| 2 | Ingestion backs up API latency | Run the worker(s) as their own deployed process(es) (already separate BullMQ consumers — just point them at their own dyno/container). Embedding (`EmbeddingProcessor`, its own `embedding` queue) is the one most likely to actually trigger this stage: it's the long-running, IO-bound member of the pair — extraction is a short CPU burst — and it's written to move as-is, unchanged, per ADR 0007. |
 | 3 | API CPU/latency under load | Scale NestJS horizontally behind a load balancer — safe because it's stateless (session in Redis, no in-memory reading-context) |
 | 4 | Vector search latency grows | Tune pgvector index (HNSW), or swap `VectorStore` impl to Qdrant — interface makes this a config change, not an app rewrite |
 | 5 | Chat volume high | Add Redis caching for repeated-question embeddings; consider a dedicated retrieval service only if it's genuinely CPU/IO-bound separately from the API |

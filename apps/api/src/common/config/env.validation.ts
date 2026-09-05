@@ -52,6 +52,17 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   STORAGE_REGION?: string;
+
+  // Tunable without a redeploy — Gemini's free-tier rate limits change, and
+  // these are what keep the embedding worker under them. See
+  // gemini-provider.service.ts. Defaults apply when unset.
+  @IsString()
+  @IsOptional()
+  EMBED_MIN_INTERVAL_MS?: string;
+
+  @IsString()
+  @IsOptional()
+  EMBED_MAX_RETRIES?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

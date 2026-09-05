@@ -5,6 +5,7 @@ import { AiKeyService } from "../ai/ai-key.service";
 import { AI_PROVIDER, AIProvider } from "../ai/ai-provider.interface";
 import { EMBEDDER, Embedder } from "../embeddings/embedder.interface";
 import { PrismaService } from "../prisma/prisma.service";
+import { IngestionScheduler } from "../queue/ingestion-scheduler.service";
 import { VECTOR_STORE, VectorStore } from "../retrieval/vector-store.interface";
 import { extractCitedPages } from "./citation-parser";
 import { ChatMessageDto } from "./dto/chat-message.dto";
@@ -19,6 +20,7 @@ export class ChatService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aiKeyService: AiKeyService,
+    private readonly scheduler: IngestionScheduler,
     @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
     @Inject(EMBEDDER) private readonly embedder: Embedder,
     @Inject(VECTOR_STORE) private readonly vectorStore: VectorStore,
@@ -29,6 +31,11 @@ export class ChatService {
    * not an SSE error event — the controller calls this before it commits to
    * `text/event-stream` response headers, since the HTTP status can't change
    * once that commitment is made.
+   *
+   * Embedding no longer happens here (see EmbeddingProcessor) — this only
+   * enqueues defensively, in case the container was spun down when the key
+   * was set or the extraction→embed handoff was otherwise missed. Dedup'd
+   * by IngestionScheduler's deterministic jobId, so this can't pile up jobs.
    */
   async assertCanChat(userId: string, document: Document): Promise<{ apiKey: string }> {
     const apiKey = await this.aiKeyService.getKey(userId);
@@ -41,18 +48,20 @@ export class ChatService {
     if (document.status === "UPLOADING" || document.status === "PROCESSING") {
       throw new BadRequestException("This document is still processing — try again in a moment.");
     }
+    if (document.status === "EMBEDDING") {
+      await this.scheduler.enqueueEmbed(document.id);
+      const { embedded, total } = await this.vectorStore.countEmbedded(document.id);
+      const percent = total > 0 ? Math.round((embedded / total) * 100) : 0;
+      throw new BadRequestException(
+        total > 0
+          ? `Still indexing this document (${percent}% done) — try again in a moment.`
+          : "Still indexing this document — try again in a moment.",
+      );
+    }
     return { apiKey };
   }
 
   async *chat(userId: string, document: Document, apiKey: string, dto: ChatMessageDto): AsyncGenerator<ChatStreamEvent> {
-    if (document.status === "EMBEDDING") {
-      yield {
-        type: "status",
-        message: "Indexing this document for the first time — larger documents can take a minute or two…",
-      };
-      await this.embedDocumentChunks(document.id, apiKey);
-    }
-
     const conversation = await this.findOrCreateConversation(userId, document.id);
 
     const recentMessages = await this.prisma.message.findMany({
@@ -121,20 +130,6 @@ export class ChatService {
 
   async clearConversation(userId: string, documentId: string): Promise<void> {
     await this.prisma.conversation.deleteMany({ where: { userId, documentId } });
-  }
-
-  private async embedDocumentChunks(documentId: string, apiKey: string): Promise<void> {
-    const chunks = await this.prisma.documentChunk.findMany({ where: { documentId } });
-
-    if (chunks.length > 0) {
-      const vectors = await this.embedder.embedBatch(
-        apiKey,
-        chunks.map((c) => c.text),
-      );
-      await this.vectorStore.upsert(chunks.map((c, i) => ({ chunkId: c.id, embedding: vectors[i] ?? [] })));
-    }
-
-    await this.prisma.document.update({ where: { id: documentId }, data: { status: "READY" } });
   }
 
   private findOrCreateConversation(userId: string, documentId: string) {

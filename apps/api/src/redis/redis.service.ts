@@ -34,6 +34,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.get(key);
   }
 
+  /** Like get(), but slides the key's expiry forward — for "active use keeps this alive" TTLs. */
+  async getAndRefresh(key: string, ttlSeconds: number): Promise<string | null> {
+    return this.client.getex(key, "EX", ttlSeconds);
+  }
+
   /** ttlSeconds omitted = no expiry. */
   async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
     if (ttlSeconds) {

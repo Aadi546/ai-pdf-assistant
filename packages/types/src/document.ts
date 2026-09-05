@@ -15,3 +15,10 @@ export interface DocumentSummary {
   pageCount: number | null;
   createdAt: string;
 }
+
+export interface DocumentStatusInfo {
+  status: DocumentStatus;
+  failureReason: string | null;
+  progress: { embedded: number; total: number };
+  needsApiKey: boolean;
+}

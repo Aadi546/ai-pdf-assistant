@@ -33,6 +33,24 @@ function buildTestPdf(text: string): Buffer {
   return Buffer.from(pdf, "latin1");
 }
 
+async function waitForStatus(
+  app: INestApplication,
+  token: string,
+  documentId: string,
+  target: string[],
+  timeoutMs = 15_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await request(app.getHttpServer())
+      .get(`/documents/${documentId}/status`)
+      .set("Authorization", `Bearer ${token}`);
+    if (target.includes(res.body.status)) return res.body.status;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for status in [${target}], last saw ${res.body.status}`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 /** Parses a raw `event: x\ndata: {...}\n\n` SSE body into typed events. */
 function parseSse(body: string): { type: string; [key: string]: unknown }[] {
   return body
@@ -116,7 +134,7 @@ describe("Chat (e2e)", () => {
   });
 
   it(
-    "streams a response, persists both messages with citations, embeds chunks, and flips status to READY",
+    "embeds a document in the background (no chat request needed) and then streams a response with citations",
     async () => {
       await aiKeyService.setKey(userId, "fake-key-for-testing");
       fakeAiProvider.stream.mockImplementation(fakeTokenStream);
@@ -131,18 +149,13 @@ describe("Chat (e2e)", () => {
         .expect(201);
       documentId = upload.body.id;
 
-      // Wait for Phase 6's ingestion job to chunk the document (status EMBEDDING).
-      const deadline = Date.now() + 10_000;
-      let status = "";
-      for (;;) {
-        const res = await request(app.getHttpServer())
-          .get(`/documents/${documentId}/status`)
-          .set("Authorization", `Bearer ${token}`);
-        status = res.body.status;
-        if (status !== "PROCESSING" || Date.now() > deadline) break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      expect(status).toBe("EMBEDDING");
+      // Embedding now happens entirely in the background — the embed job
+      // is enqueued automatically once extraction finishes (a key is
+      // already on file), so this document should reach READY on its own,
+      // with no chat request involved at all.
+      const finalStatus = await waitForStatus(app, token, documentId, ["READY", "FAILED"]);
+      expect(finalStatus).toBe("READY");
+      expect(fakeEmbedder.embedBatch).toHaveBeenCalled();
 
       const res = await request(app.getHttpServer())
         .post(`/documents/${documentId}/chat`)
@@ -151,16 +164,13 @@ describe("Chat (e2e)", () => {
         .expect(200);
 
       const events = parseSse(res.text);
-      expect(events[0]).toMatchObject({ type: "status" });
+      // No leading "status" event anymore — the chat path no longer does any
+      // embedding work of its own, so the first event is the first token.
+      expect(events[0]).toMatchObject({ type: "token" });
       expect(events.filter((e) => e.type === "token").map((e) => e.text).join("")).toBe(
         "Consistent hashing reduces key movement [Page 1].",
       );
       expect(events.at(-1)).toEqual({ type: "done", citedPages: [1] });
-
-      // Embedding actually ran against the real pgvector-backed VectorStore.
-      expect(fakeEmbedder.embedBatch).toHaveBeenCalled();
-      const docAfter = await prisma.document.findUniqueOrThrow({ where: { id: documentId } });
-      expect(docAfter.status).toBe("READY");
 
       const conversation = await request(app.getHttpServer())
         .get(`/documents/${documentId}/conversation`)
@@ -176,6 +186,40 @@ describe("Chat (e2e)", () => {
     },
     20_000,
   );
+
+  it("parks a document at EMBEDDING with no key, then embeds it automatically the moment a key is saved — no chat request involved", async () => {
+    await aiKeyService.clearKey(userId);
+
+    const upload = await request(app.getHttpServer())
+      .post("/documents")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", buildTestPdf("Sharding splits a dataset across nodes."), {
+        filename: "byok-crux-test.pdf",
+        contentType: "application/pdf",
+      })
+      .expect(201);
+    const noKeyDocId = upload.body.id;
+
+    const parked = await waitForStatus(app, token, noKeyDocId, ["EMBEDDING", "FAILED"]);
+    expect(parked).toBe("EMBEDDING");
+    const parkedStatus = await request(app.getHttpServer())
+      .get(`/documents/${noKeyDocId}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect(200);
+    expect(parkedStatus.body.needsApiKey).toBe(true);
+    expect(parkedStatus.body.progress.embedded).toBe(0);
+
+    // Saving a key is the ONLY thing that happens next — no chat request,
+    // no manual re-enqueue. AiConfigService.setKey is what should unblock it.
+    await request(app.getHttpServer())
+      .post("/ai/config")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ apiKey: "fake-key-for-testing" })
+      .expect(201);
+
+    const finalStatus = await waitForStatus(app, token, noKeyDocId, ["READY", "FAILED"]);
+    expect(finalStatus).toBe("READY");
+  });
 
   it("reuses the same conversation across messages and clears it on DELETE", async () => {
     fakeAiProvider.stream.mockImplementation(fakeTokenStream);

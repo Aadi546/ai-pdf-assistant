@@ -1,16 +1,37 @@
+import { ConfigService } from "@nestjs/config";
 import { GeminiProvider } from "./gemini-provider.service";
 
 const mockEmbedContent = jest.fn();
 const mockGenerateContent = jest.fn();
 
-jest.mock("@google/genai", () => ({
-  GoogleGenAI: jest.fn().mockImplementation(() => ({
-    models: {
-      embedContent: (...args: unknown[]) => mockEmbedContent(...args),
-      generateContent: (...args: unknown[]) => mockGenerateContent(...args),
-    },
-  })),
-}));
+// Defined inside the factory, not hoisted above it, since jest.mock() itself
+// is hoisted to the top of the file by babel — a `class` declared outside
+// would be accessed before its own initialization.
+jest.mock("@google/genai", () => {
+  class FakeApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  }
+  return {
+    ApiError: FakeApiError,
+    GoogleGenAI: jest.fn().mockImplementation(() => ({
+      models: {
+        embedContent: (...args: unknown[]) => mockEmbedContent(...args),
+        generateContent: (...args: unknown[]) => mockGenerateContent(...args),
+      },
+    })),
+  };
+});
+
+const { ApiError: FakeApiError } = jest.requireMock<{ ApiError: new (message: string, status: number) => Error }>(
+  "@google/genai",
+);
+
+/** Pacing is a no-op in these tests (EMBED_MIN_INTERVAL_MS=0) — they're testing retry/backoff, not pacing. */
+const noPacingConfig = { get: (key: string) => (key === "EMBED_MIN_INTERVAL_MS" ? "0" : undefined) } as ConfigService;
 
 function rateLimitError(retryDelaySeconds: number) {
   return new Error(
@@ -31,7 +52,7 @@ describe("GeminiProvider rate-limit handling", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.useFakeTimers();
-    provider = new GeminiProvider();
+    provider = new GeminiProvider(noPacingConfig);
   });
 
   afterEach(() => {
@@ -78,4 +99,40 @@ describe("GeminiProvider rate-limit handling", () => {
       expect.objectContaining({ contents: [{ parts: [{ text: "a" }] }, { parts: [{ text: "b" }] }] }),
     );
   });
+
+  it("retries a structured ApiError({status: 429}) even without a RESOURCE_EXHAUSTED message", async () => {
+    mockEmbedContent
+      .mockRejectedValueOnce(new FakeApiError("Too many requests", 429))
+      .mockResolvedValueOnce({ embeddings: [{ values: [1, 0, 0] }] });
+
+    const resultPromise = provider.embedBatch("fake-key", ["hello"]);
+    await jest.advanceTimersByTimeAsync(DEFAULT_BACKOFF_MS_FOR_TEST);
+    const result = await resultPromise;
+
+    expect(result).toEqual([[1, 0, 0]]);
+    expect(mockEmbedContent).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not misclassify an unrelated error whose message happens to mention 429", async () => {
+    // A structured ApiError with a non-429 status (e.g. a 404 for a
+    // deprecated model) must never be retried just because its text
+    // contains the digits "429" somewhere incidentally.
+    mockEmbedContent.mockRejectedValue(new FakeApiError("model page 429 of the docs is deprecated", 404));
+
+    await expect(provider.embedBatch("fake-key", ["hello"])).rejects.toThrow(/deprecated/);
+    expect(mockEmbedContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors a higher maxRetries for the bulk embedding path", async () => {
+    mockEmbedContent.mockRejectedValue(rateLimitError(0));
+
+    const resultPromise = provider.embedBatch("fake-key", ["hello"]);
+    const assertion = expect(resultPromise).rejects.toThrow(/rate limit is still being hit/i);
+    await jest.advanceTimersByTimeAsync(120_000);
+    await assertion;
+    // Default embedMaxRetries is 5 (6 total attempts) vs. the interactive default of 3.
+    expect(mockEmbedContent).toHaveBeenCalledTimes(6);
+  });
 });
+
+const DEFAULT_BACKOFF_MS_FOR_TEST = 3000;
