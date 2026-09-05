@@ -19,6 +19,6 @@ import { GeminiProvider } from "./gemini-provider.service";
     AiKeyService,
     AiConfigService,
   ],
-  exports: [AI_PROVIDER, EMBEDDER, AiKeyService],
+  exports: [AI_PROVIDER, EMBEDDER, AiKeyService, AiConfigService],
 })
 export class AiModule {}
