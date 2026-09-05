@@ -15,8 +15,22 @@ async function bootstrap() {
   // every request as plain HTTP and refuses to set secure: true cookies.
   app.set("trust proxy", 1);
 
+  const rawOrigins = process.env.WEB_ORIGIN ?? "http://localhost:3000";
+  const allowedOrigins = rawOrigins
+    .split(",")
+    .map((o) => o.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+
   app.enableCors({
-    origin: process.env.WEB_ORIGIN ?? "http://localhost:3000",
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+      const normalizedOrigin = origin.replace(/\/$/, "");
+      if (allowedOrigins.includes(normalizedOrigin) || allowedOrigins.includes("*")) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
     credentials: true, // required so the browser sends/receives the refresh-token cookie
   });
 
