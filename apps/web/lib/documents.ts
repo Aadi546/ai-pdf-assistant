@@ -1,4 +1,4 @@
-import { DocumentSummary } from "@ai-pdf/types";
+import { DocumentStatusInfo, DocumentSummary } from "@ai-pdf/types";
 import { apiFetch, apiJson } from "./api-client";
 
 export function listDocuments() {
@@ -7,6 +7,20 @@ export function listDocuments() {
 
 export function getDocument(id: string) {
   return apiJson<DocumentSummary>(`/documents/${id}`);
+}
+
+export function getDocumentStatus(id: string) {
+  return apiJson<DocumentStatusInfo>(`/documents/${id}/status`);
+}
+
+export async function retryDocument(id: string): Promise<void> {
+  const res = await apiFetch(`/documents/${id}/retry`, { method: "POST" });
+  if (!res.ok) throw new Error("Couldn't retry this document");
+}
+
+/** True while a document is still moving through the pipeline — used to drive polling. */
+export function isDocumentInProgress(status: DocumentSummary["status"]): boolean {
+  return status !== "READY" && status !== "FAILED";
 }
 
 export async function uploadDocument(file: File): Promise<DocumentSummary> {

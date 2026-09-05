@@ -36,6 +36,8 @@ export function useChat(documentId: string, options: UseChatOptions = {}) {
   const [error, setError] = useState<string | null>(null);
   const onSentenceRef = useRef(options.onSentence);
   onSentenceRef.current = options.onSentence;
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const lastAttemptRef = useRef<{ question: string; userMessageId: string } | null>(null);
 
   const currentPage = useReadingContextStore((s) => s.currentPage);
   const selectedText = useReadingContextStore((s) => s.selectedText);
@@ -54,12 +56,16 @@ export function useChat(documentId: string, options: UseChatOptions = {}) {
     setError(null);
     setStatusMessage(null);
     setIsStreaming(true);
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
 
     const selectionForThisMessage = selectedText ?? undefined;
     setSelectedText(null); // consumed — don't let it silently attach to a later, unrelated question
 
+    const userMessageId = `local-user-${Date.now()}`;
+    lastAttemptRef.current = { question, userMessageId };
     const userMessage: ChatMessage = {
-      id: `local-user-${Date.now()}`,
+      id: userMessageId,
       role: "USER",
       content: question,
       citedPages: [],
@@ -106,29 +112,59 @@ export function useChat(documentId: string, options: UseChatOptions = {}) {
     };
 
     try {
-      await streamChat(documentId, { question, currentPage, selectedText: selectionForThisMessage }, (event) => {
-        if (event.type === "status") {
-          setStatusMessage(event.message);
-        } else if (event.type === "token") {
-          setStatusMessage(null);
-          appendToAssistant(event.text);
-          sentenceBuffer += event.text;
-          flushSentences(false);
-        } else if (event.type === "done") {
-          setAssistantCitations(event.citedPages);
-          flushSentences(true);
-        } else if (event.type === "error") {
-          setError(event.message);
-          removeAssistantPlaceholderIfEmpty();
-        }
-      });
+      await streamChat(
+        documentId,
+        { question, currentPage, selectedText: selectionForThisMessage },
+        (event) => {
+          if (event.type === "status") {
+            setStatusMessage(event.message);
+          } else if (event.type === "token") {
+            setStatusMessage(null);
+            appendToAssistant(event.text);
+            sentenceBuffer += event.text;
+            flushSentences(false);
+          } else if (event.type === "done") {
+            setAssistantCitations(event.citedPages);
+            flushSentences(true);
+          } else if (event.type === "error") {
+            setError(event.message);
+            removeAssistantPlaceholderIfEmpty();
+          }
+        },
+        abortController.signal,
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-      removeAssistantPlaceholderIfEmpty();
+      // A deliberate Stop click, not a failure — keep whatever streamed so
+      // far (removeAssistantPlaceholderIfEmpty still drops it if nothing
+      // arrived before the abort) and don't show it as an error.
+      if (err instanceof DOMException && err.name === "AbortError") {
+        flushSentences(true);
+        removeAssistantPlaceholderIfEmpty();
+      } else {
+        setError(err instanceof Error ? err.message : "Something went wrong");
+        removeAssistantPlaceholderIfEmpty();
+      }
     } finally {
       setIsStreaming(false);
       setStatusMessage(null);
+      abortControllerRef.current = null;
     }
+  }
+
+  function stop() {
+    abortControllerRef.current?.abort();
+  }
+
+  /**
+   * Re-asks the last question. The failed attempt's user bubble is removed
+   * first — ask() adds a fresh one with a new id, and without this a retry
+   * would leave the same question shown twice in a row.
+   */
+  function retry() {
+    const attempt = lastAttemptRef.current;
+    if (!attempt) return;
+    setMessages((prev) => prev.filter((m) => m.id !== attempt.userMessageId));
+    ask(attempt.question);
   }
 
   async function clear() {
@@ -136,5 +172,5 @@ export function useChat(documentId: string, options: UseChatOptions = {}) {
     setMessages([]);
   }
 
-  return { messages, ask, clear, isStreaming, statusMessage, error, isHistoryLoading };
+  return { messages, ask, clear, stop, retry, isStreaming, statusMessage, error, isHistoryLoading };
 }

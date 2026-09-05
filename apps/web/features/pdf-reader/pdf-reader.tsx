@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
+import { Skeleton } from "@/components/skeleton";
 import { ContinueReadingBanner } from "@/features/reading-context/continue-reading-banner";
 import { useCaptureSelection } from "@/features/reading-context/use-capture-selection";
 import { useSyncReadingContext } from "@/features/reading-context/use-sync-reading-context";
@@ -126,6 +127,45 @@ export function PdfReader({ documentId, fileUrl }: { documentId: string; fileUrl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jumpToPageRequest, clearJumpRequest]);
 
+  // Keyboard shortcuts for page nav/zoom — previously mouse/touch-only.
+  // Skipped whenever focus is in a text input (the page-number box, the
+  // search box, the chat composer) so typing "-" or an arrow key there isn't
+  // hijacked into a page turn or a zoom change.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+
+      switch (e.key) {
+        case "ArrowRight":
+        case "ArrowDown":
+        case "PageDown":
+          e.preventDefault();
+          goToPage(pageNumber + 1);
+          break;
+        case "ArrowLeft":
+        case "ArrowUp":
+        case "PageUp":
+          e.preventDefault();
+          goToPage(pageNumber - 1);
+          break;
+        case "+":
+        case "=":
+          e.preventDefault();
+          setScale((s) => Math.min(MAX_SCALE, +(s + 0.1).toFixed(2)));
+          break;
+        case "-":
+          e.preventDefault();
+          setScale((s) => Math.max(MIN_SCALE, +(s - 0.1).toFixed(2)));
+          break;
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageNumber, numPages]);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-neutral-200 px-4 py-2 dark:border-neutral-800">
@@ -164,7 +204,11 @@ export function PdfReader({ documentId, fileUrl }: { documentId: string; fileUrl
             file={file}
             onLoadSuccess={({ numPages: total }) => setNumPages(total)}
             onLoadError={(err) => setLoadError(err.message)}
-            loading={<p className="p-6 text-sm text-neutral-500">Loading PDF…</p>}
+            loading={
+              <div className="flex flex-col items-center gap-4 p-6" role="status" aria-label="Loading PDF">
+                <Skeleton className="h-[600px] w-[460px] max-w-full" />
+              </div>
+            }
           >
             <div className="flex flex-col items-center gap-4">
               {windowPages.map((page) => (

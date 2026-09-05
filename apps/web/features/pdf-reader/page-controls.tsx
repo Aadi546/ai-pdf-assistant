@@ -50,12 +50,17 @@ export function PageControls({
       <button
         onClick={() => onPageChange(pageNumber - 1)}
         disabled={pageNumber <= 1}
+        aria-label="Previous page"
         className="rounded border border-neutral-300 px-2 py-1 disabled:opacity-40 dark:border-neutral-700"
       >
         Prev
       </button>
       <div className="flex items-center gap-1">
+        <label htmlFor="page-number-input" className="sr-only">
+          Page number
+        </label>
         <input
+          id="page-number-input"
           ref={inputRef}
           type="number"
           value={pageInput}
@@ -71,6 +76,7 @@ export function PageControls({
       <button
         onClick={() => onPageChange(pageNumber + 1)}
         disabled={!numPages || pageNumber >= numPages}
+        aria-label="Next page"
         className="rounded border border-neutral-300 px-2 py-1 disabled:opacity-40 dark:border-neutral-700"
       >
         Next

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { login } from "@/lib/auth";
-import { ApiError } from "@/lib/api-client";
+import { ApiError, NetworkError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 
 export function LoginForm() {
@@ -57,9 +57,22 @@ export function LoginForm() {
         />
       </div>
       {mutation.isError && (
-        <p className="text-sm text-red-500">
-          {mutation.error instanceof ApiError ? mutation.error.message : "Something went wrong"}
-        </p>
+        <div className="flex items-center gap-2">
+          <p className="text-sm text-red-500">
+            {mutation.error instanceof ApiError || mutation.error instanceof NetworkError
+              ? mutation.error.message
+              : "Something went wrong"}
+          </p>
+          {mutation.error instanceof NetworkError && (
+            <button
+              type="button"
+              onClick={() => mutation.mutate()}
+              className="shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+            >
+              Retry
+            </button>
+          )}
+        </div>
       )}
       <button type="submit" disabled={mutation.isPending} className="btn-primary w-full">
         {mutation.isPending ? "Signing in…" : "Sign in"}

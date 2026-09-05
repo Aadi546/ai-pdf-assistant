@@ -49,7 +49,11 @@ export function SearchBox({ fileUrl, numPages, onJumpToPage }: SearchBoxProps) {
 
   return (
     <form onSubmit={runSearch} className="flex flex-wrap items-center gap-2 text-sm">
+      <label htmlFor="pdf-search-input" className="sr-only">
+        Search in PDF
+      </label>
       <input
+        id="pdf-search-input"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search in PDF…"
@@ -75,6 +79,7 @@ export function SearchBox({ fileUrl, numPages, onJumpToPage }: SearchBoxProps) {
                 key={p}
                 type="button"
                 onClick={() => onJumpToPage(p)}
+                aria-label={`Jump to page ${p}`}
                 className="rounded border border-neutral-300 px-1.5 py-0.5 dark:border-neutral-700"
               >
                 {p}

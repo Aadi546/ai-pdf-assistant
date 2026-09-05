@@ -38,6 +38,7 @@ export function MessageBubble({ message, onJumpToPage, onSpeak, speakingId }: Me
                 <button
                   key={i}
                   onClick={() => onJumpToPage(page)}
+                  aria-label={`Jump to page ${page}`}
                   className="mx-0.5 rounded bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-700 hover:underline dark:bg-blue-900 dark:text-blue-300"
                 >
                   Page {page}
@@ -50,12 +51,13 @@ export function MessageBubble({ message, onJumpToPage, onSpeak, speakingId }: Me
           <button
             onClick={() => onSpeak(message.id, sanitizeForSpeech(message.content))}
             title={isSpeaking ? "Stop reading aloud" : "Read aloud"}
+            aria-label={isSpeaking ? "Stop reading aloud" : "Read aloud"}
             className={`shrink-0 rounded-full p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800 ${
               isSpeaking ? "text-blue-600 dark:text-blue-400" : ""
             }`}
           >
             {isSpeaking ? (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" aria-hidden="true">
                 <rect x="5" y="5" width="10" height="10" rx="1.5" />
               </svg>
             ) : (
@@ -68,6 +70,7 @@ export function MessageBubble({ message, onJumpToPage, onSpeak, speakingId }: Me
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 className="h-4 w-4"
+                aria-hidden="true"
               >
                 <path d="M9 3.5 5 7H2v6h3l4 3.5v-13Z" fill="currentColor" stroke="none" />
                 <path d="M13.5 6a5 5 0 0 1 0 8" />

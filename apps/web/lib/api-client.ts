@@ -10,13 +10,33 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A `fetch()` that never reached the server at all — offline, DNS failure,
+ * CORS, the API down — as distinct from `ApiError`, which means the server
+ * responded but with a non-2xx status. Callers that want to offer a "Retry"
+ * affordance specifically for "couldn't reach the server" (as opposed to
+ * "the server rejected this") can check for this type.
+ */
+export class NetworkError extends Error {
+  constructor() {
+    super("Couldn't reach the server — check your connection and try again.");
+  }
+}
+
 let refreshInFlight: Promise<string | null> | null = null;
 
 async function refreshAccessToken(): Promise<string | null> {
-  const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
-    method: "POST",
-    credentials: "include",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    // Can't reach the server at all — don't clear the session over a blip;
+    // the caller's own request will surface the network failure instead.
+    return null;
+  }
   if (!res.ok) {
     useAuthStore.getState().clearAuth();
     return null;
@@ -44,11 +64,20 @@ export async function apiFetch(path: string, options: RequestInit = {}, isRetry 
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-    credentials: "include",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      credentials: "include",
+    });
+  } catch (err) {
+    // A deliberate abort (stop-generation) isn't a network failure — let it
+    // propagate as-is so callers can tell "stopped by the user" apart from
+    // "couldn't reach the server".
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new NetworkError();
+  }
 
   if (res.status === 401 && !isRetry) {
     if (!refreshInFlight) {

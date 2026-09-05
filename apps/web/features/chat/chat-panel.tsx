@@ -3,7 +3,9 @@
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { Skeleton } from "@/components/skeleton";
 import { getAiConfigStatus } from "@/lib/ai-config";
+import { getDocumentStatus, isDocumentInProgress } from "@/lib/documents";
 import { useReadingContextStore } from "@/stores/reading-context-store";
 import { MessageBubble } from "./message-bubble";
 import { useChat } from "./use-chat";
@@ -25,7 +27,7 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
 
   const { speak, enqueueForMessage, stop: stopSpeaking, speakingId, voices, selectedVoiceURI, setVoice } = useSpeak();
 
-  const { messages, ask, clear, isStreaming, statusMessage, error, isHistoryLoading } = useChat(documentId, {
+  const { messages, ask, clear, stop, retry, isStreaming, statusMessage, error, isHistoryLoading } = useChat(documentId, {
     // Speaks each sentence the instant it finishes streaming, not after the
     // whole answer — that's what makes this feel responsive instead of
     // laggy (previously: silence until the entire response finished, then
@@ -33,6 +35,30 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
     onSentence: autoRead ? enqueueForMessage : undefined,
   });
   const { data: aiConfig } = useQuery({ queryKey: ["ai-config-status"], queryFn: getAiConfigStatus });
+
+  // Polls while the document is still being indexed so the composer's
+  // disabled state and progress line clear themselves the moment it's
+  // actually ready, instead of the user finding out only by trying to send
+  // a message and getting a 400 back.
+  const { data: docStatus } = useQuery({
+    queryKey: ["document-status", documentId],
+    queryFn: () => getDocumentStatus(documentId),
+    refetchInterval: (query) => (query.state.data && isDocumentInProgress(query.state.data.status) ? 3000 : false),
+  });
+  const notReady = docStatus != null && docStatus.status !== "READY";
+  const notReadyMessage =
+    docStatus?.status === "EMBEDDING"
+      ? docStatus.needsApiKey
+        ? null // the existing "Add your Gemini API key" banner below already covers this
+        : docStatus.progress.total > 0
+          ? `Indexing this document — ${Math.round((docStatus.progress.embedded / docStatus.progress.total) * 100)}% done…`
+          : "Indexing this document…"
+      : docStatus?.status === "FAILED"
+        ? `This document failed to process${docStatus.failureReason ? `: ${docStatus.failureReason}` : "."}`
+        : docStatus != null
+          ? "This document is still processing…"
+          : null;
+
   const selectedText = useReadingContextStore((s) => s.selectedText);
   const setSelectedText = useReadingContextStore((s) => s.setSelectedText);
 
@@ -68,13 +94,15 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
               setAutoRead((v) => !v);
             }}
             title={autoRead ? "Auto-read replies: on" : "Auto-read replies: off"}
+            aria-label={autoRead ? "Auto-read replies: on" : "Auto-read replies: off"}
+            aria-pressed={autoRead}
             className={`flex items-center gap-1 rounded-full px-2 py-1 text-xs transition-colors ${
               autoRead
                 ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
                 : "text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
             }`}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5" aria-hidden="true">
               <path d="M9 3.5 5 7H2v6h3l4 3.5v-13Z" />
               <path d="M13.5 6a5 5 0 0 1 0 8" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
             </svg>
@@ -109,10 +137,18 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
           to start chatting.
         </div>
       )}
+      {aiConfig?.configured && notReadyMessage && (
+        <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400">
+          {notReadyMessage}
+        </div>
+      )}
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4" aria-live="polite" aria-relevant="additions text">
         {isHistoryLoading ? (
-          <p className="text-sm text-neutral-500">Loading conversation…</p>
+          <div className="space-y-3" aria-label="Loading conversation">
+            <Skeleton className="h-10 w-2/3 self-end" />
+            <Skeleton className="h-14 w-3/4" />
+          </div>
         ) : messages.length === 0 ? (
           <p className="text-sm text-neutral-500">
             Ask about what you&apos;re reading — I can see your current page and anything you highlight. Try the
@@ -124,7 +160,14 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
           ))
         )}
         {statusMessage && <p className="text-xs italic text-neutral-500">{statusMessage}</p>}
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {error && (
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-red-500">{error}</p>
+            <button onClick={retry} className="shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
       {selectedText && (
@@ -144,13 +187,14 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
             type="button"
             onClick={() => (isListening ? stopListening() : startListening())}
             title={isListening ? "Stop listening" : "Ask by voice"}
+            aria-label={isListening ? "Stop listening" : "Ask by voice"}
             className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
               isListening
                 ? "animate-pulse bg-red-500 text-white"
                 : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
             }`}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" aria-hidden="true">
               <path d="M10 12.5a3 3 0 0 0 3-3v-4a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z" />
               <path d="M5.5 9a.75.75 0 0 0-1.5 0 6 6 0 0 0 5.25 5.955V16.5h-2a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5h-2v-1.545A6 6 0 0 0 16 9a.75.75 0 0 0-1.5 0 4.5 4.5 0 0 1-9 0Z" />
             </svg>
@@ -159,13 +203,20 @@ export function ChatPanel({ documentId, onJumpToPage }: { documentId: string; on
         <input
           value={isListening && interimText ? interimText : input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={isListening ? "Listening…" : "Ask anything…"}
-          disabled={isStreaming || isListening}
+          placeholder={isListening ? "Listening…" : notReady ? "Waiting for this document to finish indexing…" : "Ask anything…"}
+          aria-label="Ask a question"
+          disabled={isStreaming || isListening || notReady}
           className="input-field flex-1 rounded-full disabled:opacity-50"
         />
-        <button type="submit" disabled={isStreaming || !input.trim()} className="btn-primary shrink-0">
-          {isStreaming ? "…" : "Send"}
-        </button>
+        {isStreaming ? (
+          <button type="button" onClick={stop} className="btn-primary shrink-0">
+            Stop
+          </button>
+        ) : (
+          <button type="submit" disabled={!input.trim() || notReady} className="btn-primary shrink-0">
+            Send
+          </button>
+        )}
       </form>
     </div>
   );

@@ -22,10 +22,16 @@ export interface ChatPayload {
  * the same `event: x\ndata: {...}\n\n` framing manually off a fetch
  * ReadableStream, same pattern most production streaming-chat UIs use.
  */
-export async function streamChat(documentId: string, payload: ChatPayload, onEvent: (event: ChatStreamEvent) => void) {
+export async function streamChat(
+  documentId: string,
+  payload: ChatPayload,
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
   const res = await apiFetch(`/documents/${documentId}/chat`, {
     method: "POST",
     body: JSON.stringify(payload),
+    signal,
   });
 
   if (!res.ok) {
